@@ -1,0 +1,163 @@
+#!/bin/sh
+set -e
+set -o pipefail
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🚀 Running Pre-Commit Checks..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# ── Collect staged files ──────────────────────────────────────────────────────
+ALL_STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+if [ -z "$ALL_STAGED_FILES" ]; then
+  echo "ℹ️  No staged files found. Skipping checks."
+  exit 0
+fi
+
+echo "📂 Staged files:"
+echo "$ALL_STAGED_FILES"
+echo ""
+
+# Files eligible for Prettier (styles, scripts, markup, config)
+PRETTIER_FILES=$(echo "$ALL_STAGED_FILES" \
+  | grep -E '\.(ts|js|tsx|jsx|vue|css|scss|html|json|md)$' || true)
+
+# Files eligible for ESLint + console.log (scripts only, no type stubs)
+LINT_FILES=$(echo "$ALL_STAGED_FILES" \
+  | grep -E '\.(ts|js|tsx|jsx|vue)$' \
+  | grep -v 'cypress/support/index.d.ts' || true)
+
+PRETTIER_EXIT_CODE=0
+ESLINT_EXIT_CODE=0
+CONSOLE_LOG_ERRORS=0
+TYPE_CHECK_EXIT_CODE=0
+BUILD_EXIT_CODE=0
+
+# ── 1. Prettier ───────────────────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✨ [1/4] Prettier"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [ -n "$PRETTIER_FILES" ]; then
+  echo "📁 Files to check:"
+  echo "$PRETTIER_FILES"
+  echo ""
+  npx prettier --check $PRETTIER_FILES || PRETTIER_EXIT_CODE=$?
+
+  if [ $PRETTIER_EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo "❌ Prettier failed. Fix formatting by running:"
+    echo "   npx prettier --write ."
+    echo "   Then re-stage your files and commit again."
+  else
+    echo "✅ Prettier passed."
+  fi
+else
+  echo "ℹ️  No files require Prettier formatting."
+fi
+
+echo ""
+
+# ── 2. ESLint + console.log ───────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🔧 [2/4] ESLint"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [ -n "$LINT_FILES" ]; then
+  echo "📁 Files to lint:"
+  echo "$LINT_FILES"
+  echo ""
+
+  npx eslint $LINT_FILES || ESLINT_EXIT_CODE=$?
+
+  if [ $ESLINT_EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo "❌ ESLint failed. Fix the errors above and try again."
+  else
+    echo "✅ ESLint passed."
+  fi
+
+  echo ""
+  echo "🔎 Checking for console.log..."
+  CONSOLE_LOG_OUTPUT=$(git grep --cached -n "console.log" -- $LINT_FILES 2>/dev/null || true)
+
+  if [ -n "$CONSOLE_LOG_OUTPUT" ]; then
+    echo "❌ console.log statements found (remove before committing):"
+    echo ""
+    echo "$CONSOLE_LOG_OUTPUT"
+    CONSOLE_LOG_ERRORS=1
+  else
+    echo "✅ No console.log found."
+  fi
+else
+  echo "ℹ️  No JS/TS files to lint."
+fi
+
+echo ""
+
+# ── 3. TypeScript Type Check ───────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🔍 [3/4] TypeScript Type Check"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Run TypeScript type check (no emit) to catch type errors
+npx tsc --noEmit || TYPE_CHECK_EXIT_CODE=$?
+
+if [ $TYPE_CHECK_EXIT_CODE -ne 0 ]; then
+  echo ""
+  echo "❌ TypeScript type check failed. Fix the type errors above and try again."
+else
+  echo "✅ TypeScript type check passed."
+fi
+
+echo ""
+
+# ── 4. Build ──────────────────────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🏗️  [4/4] Build"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Run actual Vite build to catch all build errors (bundling, dependencies, etc.)
+npm run build || BUILD_EXIT_CODE=$?
+
+if [ $BUILD_EXIT_CODE -ne 0 ]; then
+  echo ""
+  echo "❌ Build (vite) failed. Fix the build errors above and try again."
+else
+  echo "✅ Build passed."
+fi
+
+echo ""
+
+# ── Final verdict ─────────────────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [ $PRETTIER_EXIT_CODE -ne 0 ] \
+  || [ $ESLINT_EXIT_CODE -ne 0 ] \
+  || [ $CONSOLE_LOG_ERRORS -ne 0 ] \
+  || [ $TYPE_CHECK_EXIT_CODE -ne 0 ] \
+  || [ $BUILD_EXIT_CODE -ne 0 ]; then
+
+  echo ""
+  echo "❌ Commit blocked. Summary of failures:"
+  [ $PRETTIER_EXIT_CODE -ne 0 ]  && echo "   • Prettier    — formatting issues found"
+  [ $ESLINT_EXIT_CODE -ne 0 ]    && echo "   • ESLint      — lint errors found"
+  [ $CONSOLE_LOG_ERRORS -ne 0 ]  && echo "   • console.log — debug statements found"
+  [ $TYPE_CHECK_EXIT_CODE -ne 0 ] && echo "   • TypeScript  — type errors found"
+  [ $BUILD_EXIT_CODE -ne 0 ]     && echo "   • Build (vite) — build errors found"
+  echo ""
+  echo "💡 Tip: Fix all issues above, re-stage your files, and commit again."
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  exit 1
+fi
+
+echo ""
+echo "✅ All checks passed. Proceeding with commit!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+exit 0
